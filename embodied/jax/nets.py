@@ -238,7 +238,7 @@ class Linear(nj.Module):
     self.units = (units,) if isinstance(units, int) else tuple(units)
 
   def __call__(self, x):
-    ensure_dtypes(x)
+    # ensure_dtypes(x)
     size = math.prod(self.units)
     shape = (x.shape[-1], size)
     x = x @ self.value('kernel', self._scaled_winit, shape).astype(x.dtype)
@@ -265,7 +265,7 @@ class BlockLinear(nj.Module):
     self.blocks = blocks
 
   def __call__(self, x):
-    ensure_dtypes(x)
+    # ensure_dtypes(x)
     assert x.shape[-1] % self.blocks == 0, (x.shape, self.blocks)
     insize = x.shape[-1]
     shape = (self.blocks, insize // self.blocks, self.units // self.blocks)
@@ -297,7 +297,7 @@ class Conv2D(nj.Module):
     self.stride = stride
 
   def __call__(self, x):
-    ensure_dtypes(x)
+    # ensure_dtypes(x)
     shape = (*self.kernel, x.shape[-1] // self.groups, self.depth)
     kernel = self.value('kernel', self._scaled_winit, shape).astype(x.dtype)
     if self.transp:
@@ -338,7 +338,7 @@ class Conv3D(nj.Module):
     self.stride = (stride,) * 3 if isinstance(stride, int) else stride
 
   def __call__(self, x):
-    ensure_dtypes(x)
+    # ensure_dtypes(x)
     if self.transp:
       assert self.groups == 1, self.groups
       shape = (*self.kernel, x.shape[-1], self.depth)
@@ -372,7 +372,7 @@ class Norm(nj.Module):
     self.impl = impl
 
   def __call__(self, x):
-    ensure_dtypes(x)
+    # ensure_dtypes(x)
     dtype = x.dtype
     x = f32(x)
     axis = [a % x.ndim for a in self.axis]

@@ -76,8 +76,8 @@ class Agent(embodied.jax.Agent):
     self.modules = [
         self.dyn, self.enc, self.dec, self.rew, self.con, self.pol, self.val]
     self.opt = embodied.jax.Optimizer(
-        self.modules, self._make_opt(**config.opt), summary_depth=1,
-        name='opt')
+        self.modules, self._make_opt(**config.opt), hessian=config.opt.opt_type == 'lra',
+        summary_depth=1, name='opt')
 
     scales = self.config.loss_scales.copy()
     rec = scales.pop('rec')
@@ -396,7 +396,7 @@ class Agent(embodied.jax.Agent):
         max_size_triangular=16384,
         min_ndim_triangular=2,
         memory_save_mode=None,
-        preconditioner_lr=0.01,
+        preconditioner_lr=0.1,
         preconditioner_init_scale=1.0,
         mu_dtype=None,
         precond_dtype=None,
@@ -412,8 +412,20 @@ class Agent(embodied.jax.Agent):
         params_partition_specs=None,
         preconditioner_partition_spec=None,
       )
+    elif opt_type == 'lra':
+      return lra.low_rank_approximation(
+        learning_rate=lr,
+        b1=beta1,
+        nesterov=False,
+        weight_decay=wd,
+        mask=wdmask,
+        uvd_rank_of_approximation=3,
+        precond_lr=0.1,
+        mu_dtype=jnp.bfloat16,
+        precision="tensorfloat32",
+      )
     else:
-      raise ValueError(f'Unknown optimizer {opt_type}, must be one of: default, kron')
+      raise ValueError(f'Unknown optimizer {opt_type}, must be one of: default, kron, lra')
 
 
 def imag_loss(

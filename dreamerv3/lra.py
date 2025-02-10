@@ -1,16 +1,38 @@
 from typing import Any, Optional, Union, Callable, NamedTuple
+from pprint import pprint
+import numpy as np
 
 import jax
 from jax import numpy as jnp
 from jax.random import PRNGKey
-
 from optax import tree_utils as otu
-from optax._src import base, transform, clipping
+from optax._src import base, transform
 from optax._src.numerics import safe_int32_increment
 from optax._src.utils import canonicalize_dtype
 from optax._src.combine import chain
 
-from psgd_jax.utils import add_eps, apply_momentum
+
+def precond_update_prob_schedule(
+    max_prob=1.0, min_prob=0.03, decay=0.001, flat_start=500
+):
+    """Anneal preconditioner update probability during beginning of training.
+
+    PSGD benefits from more preconditioner updates at the beginning of training,
+    but once the preconditioner is learned the update probability can drop low.
+
+    This schedule is an exponential anneal with a flat start. Default settings keep
+    update probability at 1.0 for 500 steps then exponentially anneal down to
+    `min_prob` by 4000 steps. Default settings work well for most models and
+    training regimes.
+    """
+
+    def _schedule(n):
+        """Exponential anneal with flat start."""
+        return jnp.clip(
+            max_prob * jnp.exp(-decay * (n - flat_start)), min_prob, max_prob
+        )
+
+    return _schedule
 
 
 class PSGDLRAState(NamedTuple):
@@ -23,30 +45,30 @@ class PSGDLRAState(NamedTuple):
 
 
 def scale_by_lra(
-    preconditioner_update_probability: float = 1.0,
+    preconditioner_update_probability: Union[
+        float, Callable[[int], float]
+    ] = precond_update_prob_schedule(),
     b1: float = 0.9,
     nesterov: bool = False,
-    uvd_rank_of_approximation: int = 10,
+    uvd_rank_of_approximation: int = 2,
     precond_lr: Union[float, Callable[[int], float]] = 0.1,
     precond_init_scale: Optional[float] = None,
-    update_global_norm_clip: Optional[float] = None,
     step_normalizer_order: str = "2nd",
     seed: Optional[PRNGKey] = None,
-    mu_dtype: Optional[Union[str, jnp.dtype]] = None,
+    mu_dtype: Optional[Union[str, jnp.dtype]] = jnp.bfloat16,
     precision: str = "tensorfloat32",
 ) -> base.GradientTransformationExtraArgs:
     """
     Implements UVd PSGD from https://github.com/lixilinx/psgd_torch.
 
     Args:
-        preconditioner_update_probability: float, probability of updating the
-            preconditioner.
+        preconditioner_update_probability: float or callable, probability of updating the
+            preconditioner. Default anneals from 1.0 to 0.03 by 4000 steps.
         b1: float, momentum parameter.
         nesterov: bool, whether to use Nesterov momentum.
         uvd_rank_of_approximation: int, rank of approximation for uvd preconditioner.
         precond_lr: float or callable, learning rate for the preconditioner.
         precond_init_scale: optional float, initial scale for the preconditioner.
-        update_global_norm_clip: optional float, clip updates by global norm.
         step_normalizer_order: str, '1st' or '2nd'.
         seed: Optional PRNGKey, random seed.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
@@ -84,8 +106,16 @@ def scale_by_lra(
         d = jnp.ones((n_params, 1), jnp.float32)
 
         # initial state
-        return PSGDLRAState(
-            count=jnp.zeros([], jnp.int32), key=key, mu=mu, U=U, V=V, d=d
+        state = dict(count=jnp.zeros([], jnp.int32), key=key, mu=mu, U=U, V=V, d=d)
+        print("Optimizer state:")
+        pprint(jax.tree.map(lambda x: x.shape, state), width=100)
+        return (
+            state["count"],
+            state["key"],
+            state["mu"],
+            state["U"],
+            state["V"],
+            state["d"],
         )
 
     def update_fn(
@@ -97,6 +127,14 @@ def scale_by_lra(
         update_preconditioner: Optional[bool] = None,
     ):
         del params
+        state = PSGDLRAState(
+            count=state[0],
+            key=state[1],
+            mu=state[2],
+            U=state[3],
+            V=state[4],
+            d=state[5],
+        )
         # use hessian preconditioning if hessian provided
         # otherwise use gg^T whitening type preconditioning
         hessian_based_preconditioning = Hvp is not None
@@ -156,10 +194,13 @@ def scale_by_lra(
 
         if not hessian_based_preconditioning:
             # update cond and vector not passed in, create here
+            update_prob_in = preconditioner_update_probability
+            if isinstance(preconditioner_update_probability, Callable):
+                update_prob_in = preconditioner_update_probability(count_inc)
+
             key, subkey = jax.random.split(key)
             update_preconditioner = jnp.logical_or(
-                jax.random.uniform(subkey) < preconditioner_update_probability,
-                state.count < 2,
+                jax.random.uniform(subkey) < update_prob_in, state.count < 2
             )
             key, subkey = jax.random.split(key)
             vector = otu.tree_random_like(subkey, updates, jax.random.normal)
@@ -186,25 +227,19 @@ def scale_by_lra(
             [jnp.reshape(x, (-1, 1)) for x in jax.tree.leaves(updates)], 0
         )
         flat_updates = _precond_grad_UVd_math(U, V, d, flat_updates)
-        with jax.ensure_compile_time_eval():
-            params_struct = jax.tree.structure(updates)
-            param_sizes = [x.size for x in jax.tree.leaves(updates)]
-            param_cumsizes = [x.item() for x in jnp.cumsum(jnp.array(param_sizes))]
-            param_shapes = [x.shape for x in jax.tree.leaves(updates)]
+        flat_updates *= jnp.minimum(1.0, 0.0001 / jnp.sqrt(jnp.mean(jnp.square(flat_updates))))
+        params_struct = jax.tree.structure(updates)
+        param_sizes = [x.size for x in jax.tree.leaves(updates)]
+        param_cumsizes = np.cumsum(param_sizes)
+        param_shapes = [x.shape for x in jax.tree.leaves(updates)]
         flat_updates = [
             jnp.reshape(flat_updates[idx - size : idx], s)
             for idx, size, s in zip(param_cumsizes, param_sizes, param_shapes)
         ]
         updates = jax.tree.unflatten(params_struct, flat_updates)
 
-        # clipping
-        if update_global_norm_clip is not None:
-            updates, _ = clipping.clip_by_global_norm(update_global_norm_clip).update(
-                updates, base.EmptyState
-            )
-
         mu = otu.tree_cast(mu, mu_dtype)
-        state = PSGDLRAState(count=count_inc, key=key, mu=mu, U=U, V=V, d=d)
+        state = (count_inc, key, mu, U, V, d)
         return updates, state
 
     return base.GradientTransformationExtraArgs(init_fn, update_fn)
@@ -220,7 +255,6 @@ def low_rank_approximation(
     uvd_rank_of_approximation: int = 10,
     precond_lr: Union[float, Callable[[int], float]] = 0.1,
     precond_init_scale: Optional[float] = None,
-    update_global_norm_clip: Optional[float] = None,
     step_normalizer_order: str = "2nd",
     seed: Optional[PRNGKey] = None,
     mu_dtype: Optional[Union[str, jnp.dtype]] = None,
@@ -240,7 +274,6 @@ def low_rank_approximation(
         uvd_rank_of_approximation: int, rank of approximation for uvd preconditioner.
         precond_lr: float or callable, learning rate for the preconditioner.
         precond_init_scale: optional float, initial scale for the preconditioner.
-        update_global_norm_clip: optional float, clip updates by global norm.
         step_normalizer_order: str, '1st' or '2nd'.
         seed: Optional PRNGKey, random seed.
         mu_dtype: optional str or jnp.dtype, dtype of the momentum accumulator.
@@ -258,7 +291,6 @@ def low_rank_approximation(
             uvd_rank_of_approximation=uvd_rank_of_approximation,
             precond_lr=precond_lr,
             precond_init_scale=precond_init_scale,
-            update_global_norm_clip=update_global_norm_clip,
             step_normalizer_order=step_normalizer_order,
             seed=seed,
             mu_dtype=mu_dtype,
@@ -393,3 +425,25 @@ def _precond_grad_UVd_math(U, V, d, g):
     g = _IpUVtmatvec(U, V, d * g)
     g = d * _IpUVtmatvec(V, U, g)
     return g
+
+
+def add_eps(x):
+    return x + jnp.finfo(x.dtype).tiny
+
+
+def apply_momentum(updates: base.Updates, momentum: base.Updates, step, b1, nesterov):
+    # ema
+    mu = otu.tree_update_moment(updates, momentum, b1, 1)
+    if nesterov:
+        # nesterov momentum for ema with bias correction
+        # https://openreview.net/pdf?id=OM0jvwB8jIp57ZJjtNEZ
+        updates = jax.tree.map(
+            lambda m, g: b1 * m + (1 - b1) * g,
+            otu.tree_bias_correction(mu, b1, safe_int32_increment(step)),
+            otu.tree_bias_correction(updates, b1, step),
+        )
+    else:
+        # bias correction only
+        updates = otu.tree_bias_correction(mu, b1, step)
+
+    return updates, mu

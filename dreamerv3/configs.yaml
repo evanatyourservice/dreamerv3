@@ -51,7 +51,7 @@ defaults:
     train_ratio: 32.0
     log_every: 120
     report_every: 300
-    save_every: 900
+    save_every: 1000000000
     envs: 16
     eval_envs: 4
     eval_eps: 1
@@ -84,7 +84,7 @@ defaults:
 
   agent:
     loss_scales: {rec: 1.0, rew: 1.0, con: 1.0, dyn: 1.0, rep: 0.1, policy: 1.0, value: 1.0, repval: 0.3}
-    opt: {opt_type: kron, lr: 3e-5, agc: 0.3, eps: 1e-20, beta1: 0.9, beta2: 0.999, momentum: True, wd: 0.01, schedule: const, warmup: 1000, anneal: 0}
+    opt: {opt_type: lra, lr: 0.003, agc: 0.3, eps: 1e-20, beta1: 0.9, beta2: 0.999, momentum: True, wd: 0.0, schedule: const, warmup: 1000, anneal: 0}
     ac_grads: False
     dyn:
       typ: rssm

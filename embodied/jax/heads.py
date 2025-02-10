@@ -85,7 +85,7 @@ class Head(nj.Module):
   def __call__(self, x):
     if not hasattr(self, self.impl):
       raise NotImplementedError(self.impl)
-    x = nets.ensure_dtypes(x)
+    # x = nets.ensure_dtypes(x)
     output = getattr(self, self.impl)(x)
     if self.space.shape:
       output = outs.Agg(output, len(self.space.shape), jnp.sum)
