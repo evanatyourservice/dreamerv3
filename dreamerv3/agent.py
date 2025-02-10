@@ -11,6 +11,8 @@ import numpy as np
 import optax
 
 from . import rssm
+from . import kron
+from . import lra
 
 f32 = jnp.float32
 i32 = jnp.int32
@@ -341,6 +343,7 @@ class Agent(embodied.jax.Agent):
 
   def _make_opt(
       self,
+      opt_type: str = 'default',
       lr: float = 4e-5,
       agc: float = 0.3,
       eps: float = 1e-20,
@@ -354,15 +357,6 @@ class Agent(embodied.jax.Agent):
       warmup: int = 1000,
       anneal: int = 0,
   ):
-    chain = []
-    chain.append(embodied.jax.opt.clip_by_agc(agc))
-    chain.append(embodied.jax.opt.scale_by_rms(beta2, eps))
-    chain.append(embodied.jax.opt.scale_by_momentum(beta1, nesterov))
-    if wd:
-      assert not wdregex[0].isnumeric(), wdregex
-      pattern = re.compile(wdregex)
-      wdmask = lambda params: {k: bool(pattern.search(k)) for k in params}
-      chain.append(optax.add_decayed_weights(wd, wdmask))
     assert anneal > 0 or schedule == 'const'
     if schedule == 'const':
       sched = optax.constant_schedule(lr)
@@ -375,8 +369,51 @@ class Agent(embodied.jax.Agent):
     if warmup:
       ramp = optax.linear_schedule(0.0, lr, warmup)
       sched = optax.join_schedules([ramp, sched], [warmup])
-    chain.append(optax.scale_by_learning_rate(sched))
-    return optax.chain(*chain)
+    wd = 0.0
+    wdmask = None
+    if wd:
+      assert not wdregex[0].isnumeric(), wdregex
+      pattern = re.compile(wdregex)
+      wdmask = lambda params: {k: bool(pattern.search(k)) for k in params}
+    if opt_type == 'default':
+      chain = []
+      chain.append(embodied.jax.opt.clip_by_agc(agc))
+      chain.append(embodied.jax.opt.scale_by_rms(beta2, eps))
+      chain.append(embodied.jax.opt.scale_by_momentum(beta1, nesterov))
+      if wd:
+        chain.append(optax.add_decayed_weights(wd, wdmask))
+      chain.append(optax.scale_by_learning_rate(sched))
+      return optax.chain(*chain)
+    elif opt_type == 'kron':
+      return kron.kron(
+        learning_rate=lr,
+        b1=beta1,
+        weight_decay=wd,
+        weight_decay_mask=wdmask,
+        preconditioner_update_probability=kron.precond_update_prob_schedule(
+          flat_start=1000, min_prob=0.1
+        ),
+        max_size_triangular=16384,
+        min_ndim_triangular=2,
+        memory_save_mode=None,
+        preconditioner_lr=0.01,
+        preconditioner_init_scale=1.0,
+        mu_dtype=None,
+        precond_dtype=None,
+        precond_update_precision="tensorfloat32",
+        precond_grads_precision=None,
+        scanned_layers=None,
+        lax_map_scanned_layers=False,
+        lax_map_batch_size=8,
+        merge_small_dims=True,
+        target_merged_dim_size=8192,
+        partition_grads_into_blocks=True,
+        block_size=512,
+        params_partition_specs=None,
+        preconditioner_partition_spec=None,
+      )
+    else:
+      raise ValueError(f'Unknown optimizer {opt_type}, must be one of: default, kron')
 
 
 def imag_loss(

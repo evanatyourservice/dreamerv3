@@ -67,9 +67,10 @@ Training script:
 
 ```sh
 python dreamerv3/main.py \
-  --logdir ~/logdir/{timestamp} \
+  --logdir logdir/{timestamp} \
   --configs crafter \
-  --run.train_ratio 32
+  --run.train_ratio 32 \
+  --jax.platform tpu
 ```
 
 To reproduce results, train on the desired task using the corresponding config,

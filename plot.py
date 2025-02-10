@@ -61,7 +61,12 @@ def load_runs(args):
     assert found, (indir, args.pattern)
     for filename in found:
       if args.newstyle:
-        _, task, method, seed = filename.parent.name.split('-')
+        try:
+          _, task, method, seed = filename.parent.name.split('-')
+        except ValueError:
+          task = 'default_task'
+          method = 'default_method'
+          seed = filename.parent.name
       else:
         task, method, seed = str(filename).split('/')[-4: -1]
       if not (methods.search(method) and tasks.search(task)):
@@ -395,8 +400,8 @@ def main(args):
 if __name__ == '__main__':
   main(elements.Flags(
       pattern='**/scores.jsonl',
-      indirs=[''],
-      outdir='',
+      indirs=['logdir/20250209T183543'],
+      outdir='logdir',
       methods='.*',
       tasks='.*',
       newstyle=True,
